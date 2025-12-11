@@ -9,6 +9,7 @@ import { AppliedDiscount } from '../entities/AppliedDiscount.entity';
 import { User } from '../entities/User.entity';
 import { PurchaseHistory } from '../entities/PurchaseHistory.entity';
 import { ParkingLot } from '../entities/ParkingLot.entity';
+import { EventsGateway } from '../events/events.gateway';
 
 @Injectable()
 export class PaymentService {
@@ -25,7 +26,10 @@ export class PaymentService {
         private appliedDiscountRepository: Repository<AppliedDiscount>,
         @InjectRepository(PurchaseHistory)
         private purchaseHistoryRepository: Repository<PurchaseHistory>,
+        @InjectRepository(User)
+        private userRepository: Repository<User>,
         private dataSource: DataSource,
+        private eventsGateway: EventsGateway,
     ) { }
 
     async calculateFee(entryTime: Date, exitTime: Date, feePolicy: FeePolicy): Promise<number> {
@@ -98,7 +102,7 @@ export class PaymentService {
         // 3. Apply Discounts (Simulation)
         let discountAmount = 0;
         let finalFee = originalFee;
-        let appliedDiscountsDetails: { description: string, amount: number }[] = [];
+        let appliedDiscountsDetails: { description: string, amount: number, rate?: number }[] = [];
 
         if (userId) {
             try {
@@ -136,7 +140,8 @@ export class PaymentService {
                             discountAmount += discount;
                             appliedDiscountsDetails.push({
                                 description: rule.name,
-                                amount: discount
+                                amount: discount,
+                                rate: rule.discountRate // Add rate info
                             });
                         }
                     }
@@ -162,98 +167,158 @@ export class PaymentService {
         };
     }
 
-    async processPayment(parkingLogId: string, userId: string | null, paymentMethod: string): Promise<PaymentLog> {
-        return this.dataSource.transaction(async manager => {
-            const parkingLog = await manager.findOne(ParkingLog, { where: { id: parkingLogId }, relations: ['parkingSpace', 'parkingSpace.zone', 'parkingSpace.zone.parkingLot'] });
-            if (!parkingLog) throw new NotFoundException('Parking log not found');
+    private activeTransactions = new Map<string, boolean>();
 
-            if (parkingLog.status === 'PAID') throw new BadRequestException('Already paid');
+    async cancelTransaction(transactionId: string) {
+        if (this.activeTransactions.has(transactionId)) {
+            this.activeTransactions.set(transactionId, true);
+            console.log(`[Transaction] Cancel requested for ${transactionId}`);
+        }
+    }
 
-            const parkingLotId = parkingLog.parkingSpace.zone.parkingLot.id;
-            const now = new Date();
+    private async sleep(ms: number) {
+        return new Promise(resolve => setTimeout(resolve, ms));
+    }
 
-            // 1. Get Fee Policy
-            const feePolicy = await manager.findOne(FeePolicy, { where: { parkingLot: { id: parkingLotId } } });
-            if (!feePolicy) throw new NotFoundException('Fee policy not found');
+    private checkCancellation(transactionId: string) {
+        if (this.activeTransactions.get(transactionId)) {
+            throw new Error('Transaction Cancelled by User');
+        }
+    }
 
-            // 2. Calculate Base Fee
-            const originalAmount = await this.calculateFee(parkingLog.entryTime, now, feePolicy);
+    async pay(parkingLogId: string, amount: number, paymentMethod: string, discountAmount: number = 0, forceFail: boolean = false, transactionId?: string, userId?: string | null): Promise<PaymentLog> {
+        if (transactionId) {
+            this.activeTransactions.set(transactionId, false);
+        }
 
-            // 3. Apply Discounts
-            let discountAmount = 0;
-            const appliedDiscountsToSave: AppliedDiscount[] = [];
+        const queryRunner = this.dataSource.createQueryRunner();
+        await queryRunner.connect();
+        await queryRunner.startTransaction();
 
-            if (userId) {
-                const user = await manager.findOne(User, { where: { id: userId } });
-                const discountRules = await manager.find(DiscountRule, { where: { parkingLot: { id: parkingLotId } } });
+        let lotId: string | null = null;
 
-                const startOfDay = new Date(now.setHours(0, 0, 0, 0));
-                const purchases = await manager.createQueryBuilder(PurchaseHistory, 'ph')
-                    .where('ph.userId = :userId', { userId })
-                    .andWhere('ph.parkingLotId = :parkingLotId', { parkingLotId })
-                    .andWhere('ph.purchaseTime >= :startOfDay', { startOfDay })
-                    .getMany();
+        try {
+            const parkingLog = await queryRunner.manager.findOne(ParkingLog, {
+                where: { id: parkingLogId },
+                relations: ['vehicle', 'parkingSpace', 'parkingSpace.zone', 'parkingSpace.zone.parkingLot']
+            });
 
-                const totalPurchaseAmount = purchases.reduce((sum, p) => sum + Number(p.amount), 0);
+            if (!parkingLog) {
+                throw new NotFoundException('Parking log not found');
+            }
 
-                const applicableDiscounts = await this.getApplicableDiscounts(user!, totalPurchaseAmount, discountRules);
+            lotId = parkingLog.parkingSpace.zone.parkingLot.id;
 
-                for (const { rule } of applicableDiscounts) {
-                    let discount = 0;
-                    if (rule.discountRate > 0) {
-                        discount = originalAmount * (rule.discountRate / 100);
-                    } else if (rule.discountAmount > 0) {
-                        discount = rule.discountAmount;
-                    }
+            if (parkingLog.status === 'PAID') {
+                throw new BadRequestException('Already paid');
+            }
 
-                    if (discount > 0) {
-                        discountAmount += discount;
-                        const applied = new AppliedDiscount();
-                        applied.discountRule = rule;
-                        applied.appliedAmount = discount;
-                        applied.description = rule.name;
-                        appliedDiscountsToSave.push(applied);
-                    }
+            // Step 1: Create Payment Log
+            if (transactionId && lotId) {
+                this.eventsGateway.broadcastLog(lotId, '결제 로그 생성 중...', 'INFO');
+                await this.sleep(2000);
+                this.checkCancellation(transactionId);
+            }
+
+            const logMsg1 = `[DB] PAYMENT_LOG Inserted... (Amount: ${amount})`;
+            console.log(logMsg1);
+            if (transactionId && lotId) {
+                this.eventsGateway.broadcastLog(lotId, logMsg1, 'INFO');
+            }
+            const paymentLog = queryRunner.manager.create(PaymentLog, {
+                paymentTime: new Date(),
+                amount: amount,
+                paymentMethod: paymentMethod,
+                parkingLog: parkingLog,
+                receiptNo: `REC-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+                originalAmount: amount + discountAmount,
+                discountAmount: discountAmount,
+                finalAmount: amount,
+                feePolicy: undefined
+            });
+            await queryRunner.manager.save(paymentLog);
+
+            // Step 2: Update Parking Log Status
+            if (transactionId && lotId) {
+                this.eventsGateway.broadcastLog(lotId, '주차 상태 변경 중 (PAID)...', 'INFO');
+                await this.sleep(2000);
+                this.checkCancellation(transactionId);
+            }
+
+            parkingLog.status = 'PAID';
+            await queryRunner.manager.save(parkingLog);
+
+            // Step 3: Save Applied Discounts
+            if (transactionId && lotId) {
+                this.eventsGateway.broadcastLog(lotId, '할인 내역 저장 중...', 'INFO');
+                await this.sleep(2000);
+                this.checkCancellation(transactionId);
+            }
+
+            if (discountAmount > 0) {
+                const logMsg2 = `[DB] APPLIED_DISCOUNT Inserted... (Amount: ${discountAmount})`;
+                console.log(logMsg2);
+                if (transactionId && lotId) {
+                    this.eventsGateway.broadcastLog(lotId, logMsg2, 'INFO');
                 }
 
-                discountAmount = Math.min(discountAmount, originalAmount);
+                const applied = new AppliedDiscount();
+                applied.paymentLog = paymentLog;
+                applied.appliedAmount = discountAmount;
+                applied.description = '기본 할인'; // Placeholder
+                await queryRunner.manager.save(AppliedDiscount, applied);
             }
 
-            const finalAmount = originalAmount - discountAmount;
-
-            // 4. Create Payment Log
-            const paymentLog = new PaymentLog();
-            paymentLog.parkingLog = parkingLog;
-            paymentLog.feePolicy = feePolicy;
-            paymentLog.originalAmount = originalAmount;
-            paymentLog.discountAmount = discountAmount;
-            paymentLog.finalAmount = finalAmount;
-            paymentLog.paymentMethod = paymentMethod;
-            paymentLog.paidAt = new Date();
-            paymentLog.receiptNo = `RCPT-${Date.now()}`;
-
-            const savedPaymentLog = await manager.save(PaymentLog, paymentLog);
-
-            // 5. Save Applied Discounts
-            for (const applied of appliedDiscountsToSave) {
-                applied.paymentLog = savedPaymentLog;
-                await manager.save(AppliedDiscount, applied);
+            // Step 4: Link User
+            if (transactionId && lotId) {
+                this.eventsGateway.broadcastLog(lotId, '사용자 정보 연동 중...', 'INFO');
+                await this.sleep(2000);
+                this.checkCancellation(transactionId);
             }
 
-            // 6. Update Parking Log Status
-            parkingLog.status = 'PAID';
-            parkingLog.exitTime = new Date();
-            await manager.save(ParkingLog, parkingLog);
+            if (userId) {
+                const user = await queryRunner.manager.findOne(User, { where: { id: userId } });
+                if (user) {
+                    parkingLog.user = user;
+                    await queryRunner.manager.save(parkingLog);
+                    const logMsg3 = `[DB] User Linked to ParkingLog: ${user.name}`;
+                    console.log(logMsg3);
+                    if (transactionId && lotId) {
+                        this.eventsGateway.broadcastLog(lotId, logMsg3, 'INFO');
+                        await this.sleep(2000);
+                        this.checkCancellation(transactionId);
+                    }
+                }
+            }
 
-            return savedPaymentLog;
-        });
+            await queryRunner.commitTransaction();
+
+            if (transactionId && lotId) {
+                this.eventsGateway.broadcastLog(lotId, '결제 트랜잭션 완료', 'SUCCESS');
+            }
+
+            return paymentLog;
+
+        } catch (err: any) {
+            console.log('🔄 Transaction Rolling back...');
+            if (transactionId && lotId) {
+                this.eventsGateway.broadcastLog(lotId, `🚨 결제 실패: ${err.message}`, 'ERROR');
+            }
+            await queryRunner.rollbackTransaction();
+            throw err;
+        } finally {
+            await queryRunner.release();
+            if (transactionId) {
+                this.activeTransactions.delete(transactionId);
+            }
+        }
     }
 
     async getReceipts(filters: { userId?: string, receiptNo?: string, includeNonMembers?: boolean }): Promise<PaymentLog[]> {
         const query = this.paymentLogRepository.createQueryBuilder('pl')
             .leftJoinAndSelect('pl.parkingLog', 'pLog')
             .leftJoinAndSelect('pLog.vehicle', 'vehicle')
-            .leftJoinAndSelect('vehicle.user', 'user')
+            .leftJoinAndSelect('pLog.user', 'user') // Join user from ParkingLog
             .leftJoinAndSelect('pl.appliedDiscounts', 'ad')
             .leftJoinAndSelect('ad.discountRule', 'dr')
             .orderBy('pl.paidAt', 'DESC');
@@ -264,7 +329,7 @@ export class PaymentService {
 
         if (filters.userId) {
             if (filters.userId === 'NON_MEMBER') {
-                query.andWhere('vehicle.user IS NULL');
+                query.andWhere('user.id IS NULL'); // Check ParkingLog user
             } else {
                 query.andWhere('user.id = :userId', { userId: filters.userId });
             }

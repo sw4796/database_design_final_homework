@@ -6,8 +6,13 @@ export class PaymentController {
     constructor(private readonly paymentService: PaymentService) { }
 
     @Post('pay')
-    async pay(@Body() body: { parkingLogId: string; userId: string | null; method: string }) {
-        return this.paymentService.processPayment(body.parkingLogId, body.userId, body.method);
+    async pay(@Body() body: { parkingLogId: string, userId: string | null, method: string, amount: number, discountAmount?: number, forceFail?: boolean, transactionId?: string }) {
+        return this.paymentService.pay(body.parkingLogId, body.amount, body.method, body.discountAmount, body.forceFail, body.transactionId, body.userId);
+    }
+
+    @Post('cancel')
+    async cancel(@Body() body: { transactionId: string }) {
+        return this.paymentService.cancelTransaction(body.transactionId);
     }
 
     @Post('preview')
