@@ -1,13 +1,27 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, OneToMany } from 'typeorm';
 import { ParkingLog } from './ParkingLog.entity';
+import { FeePolicy } from './FeePolicy.entity';
+import { AppliedDiscount } from './AppliedDiscount.entity';
 
 @Entity()
 export class PaymentLog {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
-    @Column()
-    amount: number;
+    @ManyToOne(() => ParkingLog)
+    parkingLog: ParkingLog;
+
+    @ManyToOne(() => FeePolicy)
+    feePolicy: FeePolicy;
+
+    @Column({ type: 'decimal', precision: 10, scale: 2 })
+    originalAmount: number;
+
+    @Column({ type: 'decimal', precision: 10, scale: 2 })
+    discountAmount: number;
+
+    @Column({ type: 'decimal', precision: 10, scale: 2 })
+    finalAmount: number;
 
     @Column()
     paymentMethod: string;
@@ -15,6 +29,9 @@ export class PaymentLog {
     @CreateDateColumn()
     paidAt: Date;
 
-    @ManyToOne(() => ParkingLog)
-    parkingLog: ParkingLog;
+    @Column()
+    receiptNo: string;
+
+    @OneToMany(() => AppliedDiscount, (appliedDiscount) => appliedDiscount.paymentLog)
+    appliedDiscounts: AppliedDiscount[];
 }

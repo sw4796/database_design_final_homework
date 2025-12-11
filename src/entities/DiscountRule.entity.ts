@@ -26,4 +26,7 @@ export class DiscountRule {
 
     @ManyToOne(() => ParkingLot)
     parkingLot: ParkingLot;
+
+    @Column({ default: false })
+    isDeleted: boolean;
 }

@@ -14,7 +14,8 @@ export class ParkingLog {
     exitTime: Date;
 
     @ManyToOne(() => ParkingSpace)
-    space: ParkingSpace;
+    @ManyToOne(() => ParkingSpace)
+    parkingSpace: ParkingSpace;
 
     @ManyToOne(() => Vehicle)
     vehicle: Vehicle;

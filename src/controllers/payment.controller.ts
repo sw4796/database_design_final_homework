@@ -1,17 +1,30 @@
-import { Controller, Post, Body, Get, Query } from '@nestjs/common';
+import { Controller, Post, Body, Get, Query, Param } from '@nestjs/common';
 import { PaymentService } from '../services/payment.service';
 
 @Controller('payment')
 export class PaymentController {
     constructor(private readonly paymentService: PaymentService) { }
 
-    @Get('calculate')
-    async calculateFee(@Query('plateNumber') plateNumber: string) {
-        return this.paymentService.calculateFee(plateNumber);
+    @Post('pay')
+    async pay(@Body() body: { parkingLogId: string; userId: string | null; method: string }) {
+        return this.paymentService.processPayment(body.parkingLogId, body.userId, body.method);
     }
 
-    @Post('pay')
-    async pay(@Body() body: { plateNumber: string; amount: number; method: string }) {
-        return this.paymentService.processPayment(body.plateNumber, body.amount, body.method);
+    @Post('preview')
+    async preview(@Body() body: { plateNumber: string; userId?: string }) {
+        return this.paymentService.previewFee(body.plateNumber, body.userId);
+    }
+
+    @Get('receipts')
+    async getReceipts(
+        @Query('userId') userId?: string,
+        @Query('receiptNo') receiptNo?: string
+    ) {
+        return this.paymentService.getReceipts({ userId, receiptNo });
+    }
+
+    @Get('payable-vehicles')
+    async getPayableVehicles(@Query('lotId') lotId: string) {
+        return this.paymentService.getPayableVehicles(lotId);
     }
 }

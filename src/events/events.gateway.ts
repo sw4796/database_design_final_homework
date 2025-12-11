@@ -41,4 +41,12 @@ export class EventsGateway
     broadcastToLot(lotId: string, event: string, data: any) {
         this.server.to(lotId).emit(event, data);
     }
+
+    broadcastLog(lotId: string, message: string, type: 'INFO' | 'WARN' | 'ERROR' | 'SUCCESS' = 'INFO') {
+        this.server.to(lotId).emit('simulationLog', {
+            message,
+            type,
+            timestamp: new Date()
+        });
+    }
 }

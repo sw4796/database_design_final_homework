@@ -21,6 +21,18 @@ export class FeePolicy {
     @Column()
     unitFee: number;
 
+    @Column({ type: 'decimal', precision: 10, scale: 2 })
+    maxFee: number;
+
+    @Column({ default: () => 'CURRENT_TIMESTAMP' })
+    validFrom: Date;
+
+    @Column({ default: '2099-12-31 23:59:59' })
+    validTo: Date;
+
     @ManyToOne(() => ParkingLot)
     parkingLot: ParkingLot;
+
+    @Column({ default: false })
+    isDeleted: boolean;
 }

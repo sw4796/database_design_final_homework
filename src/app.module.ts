@@ -20,6 +20,16 @@ import { FeePolicy } from './entities/FeePolicy.entity';
 import { DiscountRule } from './entities/DiscountRule.entity';
 import { PaymentLog } from './entities/PaymentLog.entity';
 
+import { PolicyService } from './services/policy.service';
+import { PolicyController } from './controllers/policy.controller';
+import { PurchaseHistoryService } from './services/purchase-history.service';
+import { PurchaseHistoryController } from './controllers/purchase-history.controller';
+import { PurchaseHistory } from './entities/PurchaseHistory.entity';
+import { AppliedDiscount } from './entities/AppliedDiscount.entity';
+
+import { UserService } from './services/user.service';
+import { UserController } from './controllers/user.controller';
+
 @Module({
   imports: [
     ConfigModule.forRoot({
@@ -45,6 +55,8 @@ import { PaymentLog } from './entities/PaymentLog.entity';
           FeePolicy,
           DiscountRule,
           PaymentLog,
+          PurchaseHistory,
+          AppliedDiscount,
         ],
         synchronize: true, // Auto-create tables (dev only)
       }),
@@ -56,9 +68,16 @@ import { PaymentLog } from './entities/PaymentLog.entity';
       ParkingLog,
       AssignmentLog,
       PaymentLog,
+      ParkingLot,
+      ParkingZone,
+      FeePolicy,
+      DiscountRule,
+      PurchaseHistory,
+      AppliedDiscount,
+      User,
     ]),
   ],
-  controllers: [AppController, ParkingController, PaymentController, SimulationController],
-  providers: [AppService, EventsGateway, ParkingService, PaymentService],
+  controllers: [AppController, ParkingController, PaymentController, SimulationController, PolicyController, PurchaseHistoryController, UserController],
+  providers: [AppService, EventsGateway, ParkingService, PaymentService, PolicyService, PurchaseHistoryService, UserService],
 })
 export class AppModule { }

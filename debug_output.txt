@@ -1,0 +1,1 @@
+{"parkingLogId":"39245a8e-b86f-42af-83cb-9911a21ec4aa","plateNumber":"TEST-8255","entryTime":"2025-12-11T08:39:17.254Z","duration":0,"originalAmount":1000,"discountAmount":100,"finalAmount":900,"discounts":[{"description":"새 할인 정책","amount":100}]}

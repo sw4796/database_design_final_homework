@@ -1,0 +1,46 @@
+1. Finding User and Lot...
+User found: 홍길동 (fddc256b-b21f-4856-b602-f578577d8f98), Grade: GOLD
+Lot found: Shopping Mall B (789aa711-10b2-4c9e-ad2c-609dd0d7aea5)
+Discount Rules found: 2
+[
+  {
+    "id": "d5bb361a-4598-41d0-82d4-b65b0ce430a4",
+    "name": "새 할인 정책",
+    "targetType": "USER_GRADE",
+    "grade": "SILVER",
+    "minPurchaseAmount": 0,
+    "discountRate": 10,
+    "discountAmount": 0,
+    "isDeleted": false
+  },
+  {
+    "id": "ff9e17a1-9760-4d89-8616-1cbf7eef70c5",
+    "name": "새 할인 정책",
+    "targetType": "USER_GRADE",
+    "grade": "GOLD",
+    "minPurchaseAmount": 0,
+    "discountRate": 10,
+    "discountAmount": 0,
+    "isDeleted": false
+  }
+]
+Total Purchase History items: 0
+Today's Purchase History: []
+Total Purchase Amount Today: 0
+Entering vehicle DISC-TEST-819...
+Previewing Fee...
+Preview Result: {
+  "parkingLogId": "37379bfd-f1f2-4269-9e99-e744d4d2e237",
+  "plateNumber": "DISC-TEST-819",
+  "entryTime": "2025-12-11T12:49:41.910Z",
+  "duration": 0,
+  "originalAmount": 1000,
+  "discountAmount": 100,
+  "finalAmount": 900,
+  "discounts": [
+    {
+      "description": "새 할인 정책",
+      "amount": 100
+    }
+  ]
+}
