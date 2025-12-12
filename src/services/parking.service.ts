@@ -4,10 +4,11 @@ import { Repository, IsNull, Not, DataSource } from 'typeorm';
 import { ParkingSpace, SpaceStatus, SpaceType } from '../entities/ParkingSpace.entity';
 import { Vehicle, VehicleType } from '../entities/Vehicle.entity';
 import { ParkingLog } from '../entities/ParkingLog.entity';
-import { AssignmentLog } from '../entities/AssignmentLog.entity';
+import { AssignmentLog, AssignmentStatus } from '../entities/AssignmentLog.entity';
 import { ParkingLot } from '../entities/ParkingLot.entity';
 import { ParkingZone } from '../entities/ParkingZone.entity';
 import { EventsGateway } from '../events/events.gateway';
+import { ErrorLog } from '../entities/ErrorLog.entity';
 
 @Injectable()
 export class ParkingService {
@@ -24,6 +25,8 @@ export class ParkingService {
         private parkingLotRepository: Repository<ParkingLot>,
         @InjectRepository(ParkingZone)
         private parkingZoneRepository: Repository<ParkingZone>,
+        @InjectRepository(ErrorLog)
+        private errorLogRepository: Repository<ErrorLog>,
         private eventsGateway: EventsGateway,
         private dataSource: DataSource,
     ) { }
@@ -213,6 +216,36 @@ export class ParkingService {
             const victimVehicleId = targetSpace.currentVehicleId;
             if (victimVehicleId) {
                 victimVehicle = await this.vehicleRepository.findOne({ where: { id: victimVehicleId } });
+
+                // [SPOT_THEFT] Log Error Immediately
+                if (victimVehicle) {
+                    console.warn(`[ErrorLog] SPOT_THEFT: Space assigned to ${victimVehicle.plateNumber} but occupied by ${vehicle.plateNumber}.`);
+
+                    // Find Assignment Log for Victim
+                    const victimAssignment = await this.assignmentLogRepository.findOne({
+                        where: { vehicle: { id: victimVehicle.id }, status: AssignmentStatus.ACTIVE },
+                        order: { assignedAt: 'DESC' }
+                    });
+
+                    const errorLog = this.errorLogRepository.create({
+                        space: targetSpace,
+                        assignmentLog: victimAssignment || undefined,
+                        sensorState: 'OCCUPIED',
+                        dbState: targetSpace.status,
+                        errorType: 'SPOT_THEFT',
+                        detectedAt: new Date(),
+                        description: `Space assigned to ${victimVehicle.plateNumber} but occupied by ${vehicle.plateNumber}.`
+                    });
+                    await this.errorLogRepository.save(errorLog);
+
+                    if (targetSpace.zone?.parkingLot) {
+                        this.eventsGateway.broadcastLog(
+                            targetSpace.zone.parkingLot.id,
+                            `🚨 SPOT_THEFT: ${victimVehicle.plateNumber} 자리 뺏김 (by ${vehicle.plateNumber})`,
+                            'ERROR'
+                        );
+                    }
+                }
             }
         } else if (targetSpace.status === SpaceStatus.OCCUPIED && targetSpace.currentVehicleId !== vehicle.id) {
             throw new BadRequestException('Space is already occupied.');
@@ -264,6 +297,23 @@ export class ParkingService {
         // Broadcast Update
         await this.broadcastSpaceUpdate(targetSpace, 'OCCUPIED', vehicle.plateNumber, `${targetSpace.spaceCode}: ${vehicle.plateNumber} 주차 완료`);
 
+        // Trigger Sensor Event Processing (Check for errors)
+        await this.processSensorEvent(targetSpace.id, 'OCCUPIED');
+
+        // Update Assignment Log Status to COMPLETED
+        const activeAssignment = await this.assignmentLogRepository.findOne({
+            where: {
+                vehicle: { id: vehicle.id },
+                status: AssignmentStatus.ACTIVE
+            },
+            order: { assignedAt: 'DESC' }
+        });
+
+        if (activeAssignment) {
+            activeAssignment.status = AssignmentStatus.COMPLETED;
+            await this.assignmentLogRepository.save(activeAssignment);
+        }
+
         return {
             message: 'Vehicle parked',
             space: targetSpace.spaceCode,
@@ -271,85 +321,6 @@ export class ParkingService {
         };
     }
 
-    private async reassignVehicle(vehicle: Vehicle, lotId?: string) {
-        console.log(`[Reassign] Starting reassignment for ${vehicle.plateNumber} in lot ${lotId}`);
-
-        // Clear from current spot first
-        await this.clearVehicleFromSpaces(vehicle.id);
-
-        const whereCondition: any = {
-            status: SpaceStatus.EMPTY,
-            type: vehicle.type === VehicleType.EV ? SpaceType.EV :
-                vehicle.type === VehicleType.DISABLED ? SpaceType.DISABLED :
-                    SpaceType.GENERAL
-        };
-
-        if (lotId) {
-            whereCondition.zone = { parkingLot: { id: lotId } };
-        }
-
-        // Find new space
-        let space = await this.spaceRepository.findOne({
-            where: whereCondition,
-            order: { spaceCode: 'ASC' },
-            relations: ['zone', 'zone.parkingLot']
-        });
-
-        if (!space && vehicle.type !== VehicleType.DISABLED) {
-            const fallbackCondition: any = { status: SpaceStatus.EMPTY, type: SpaceType.GENERAL };
-            if (lotId) {
-                fallbackCondition.zone = { parkingLot: { id: lotId } };
-            }
-
-            space = await this.spaceRepository.findOne({
-                where: fallbackCondition,
-                order: { spaceCode: 'ASC' },
-                relations: ['zone', 'zone.parkingLot']
-            });
-        }
-
-        if (space) {
-            console.log(`[Reassign] Found new space ${space.spaceCode} for ${vehicle.plateNumber}`);
-            space.status = SpaceStatus.RESERVED;
-            space.currentVehicleId = vehicle.id;
-            await this.spaceRepository.save(space);
-
-            const assignmentLog = this.assignmentLogRepository.create({
-                space,
-                vehicle,
-                reason: 'REASSIGNMENT_CONFLICT',
-            });
-            await this.assignmentLogRepository.save(assignmentLog);
-
-            // Update the ParkingLog to point to the new space? 
-            // Actually, the ParkingLog tracks the *current* active session.
-            // If we reassign, we should probably update the space reference in the log if it was 'ASSIGNED'.
-            const parkingLog = await this.parkingLogRepository.findOne({
-                where: { vehicle: { id: vehicle.id }, status: 'ASSIGNED' },
-                order: { entryTime: 'DESC' }
-            });
-            if (parkingLog) {
-                parkingLog.parkingSpace = space;
-                await this.parkingLogRepository.save(parkingLog);
-            }
-
-            await this.broadcastSpaceUpdate(space, 'RESERVED', vehicle.plateNumber, `배정 충돌 발생 ${vehicle.plateNumber} 재배정 실시: ${space.spaceCode}으로 재배정`);
-        } else {
-            console.warn(`[Reassign] Failed to find space for ${vehicle.plateNumber} in lot ${lotId}`);
-            // If we fail to reassign, we should probably mark them as EXITED in the log so they don't get stuck?
-            // Or just leave them floating?
-            // Let's mark as EXITED to be clean.
-            const parkingLog = await this.parkingLogRepository.findOne({
-                where: { vehicle: { id: vehicle.id }, status: 'ASSIGNED' },
-                order: { entryTime: 'DESC' }
-            });
-            if (parkingLog) {
-                parkingLog.status = 'EXITED';
-                parkingLog.exitTime = new Date();
-                await this.parkingLogRepository.save(parkingLog);
-            }
-        }
-    }
 
     private async clearVehicleFromSpaces(vehicleId: string, excludeSpaceId?: string) {
         const spaces = await this.spaceRepository.find({ where: { currentVehicleId: vehicleId } });
@@ -474,7 +445,6 @@ export class ParkingService {
         space.currentVehicleId = null;
         await this.spaceRepository.save(space);
         await this.broadcastSpaceUpdate(space, 'CLOSED', null, `${space.spaceCode} 폐쇄됨`);
-
         return { message: 'Space closed' };
     }
 
@@ -489,5 +459,174 @@ export class ParkingService {
         await this.broadcastSpaceUpdate(space, 'EMPTY', null, `${space.spaceCode} 개방됨`);
 
         return { message: 'Space opened' };
+    }
+
+    async reassignVehicle(vehicle: Vehicle, lotId?: string): Promise<void> {
+        const whereCondition: any = {
+            status: SpaceStatus.EMPTY,
+            type: vehicle.type === VehicleType.EV ? SpaceType.EV :
+                vehicle.type === VehicleType.DISABLED ? SpaceType.DISABLED :
+                    SpaceType.GENERAL
+        };
+
+        if (lotId) {
+            whereCondition.zone = { parkingLot: { id: lotId } };
+        }
+
+        // Find new space
+        let space = await this.spaceRepository.findOne({
+            where: whereCondition,
+            order: { spaceCode: 'ASC' },
+            relations: ['zone', 'zone.parkingLot']
+        });
+
+        if (!space && vehicle.type !== VehicleType.DISABLED) {
+            const fallbackCondition: any = { status: SpaceStatus.EMPTY, type: SpaceType.GENERAL };
+            if (lotId) {
+                fallbackCondition.zone = { parkingLot: { id: lotId } };
+            }
+
+            space = await this.spaceRepository.findOne({
+                where: fallbackCondition,
+                order: { spaceCode: 'ASC' },
+                relations: ['zone', 'zone.parkingLot']
+            });
+        }
+
+        if (space) {
+            console.log(`[Reassign] Found new space ${space.spaceCode} for ${vehicle.plateNumber}`);
+
+            // 1. Cancel Old Assignment
+            const oldAssignment = await this.assignmentLogRepository.findOne({
+                where: { vehicle: { id: vehicle.id }, status: AssignmentStatus.ACTIVE },
+                order: { assignedAt: 'DESC' }
+            });
+            if (oldAssignment) {
+                oldAssignment.status = AssignmentStatus.CANCELLED;
+                await this.assignmentLogRepository.save(oldAssignment);
+            }
+
+            // 2. Reserve New Space
+            space.status = SpaceStatus.RESERVED;
+            space.currentVehicleId = vehicle.id;
+            await this.spaceRepository.save(space);
+
+            // 3. Create New Assignment
+            const assignmentLog = this.assignmentLogRepository.create({
+                space,
+                vehicle,
+                reason: 'REASSIGNMENT_CONFLICT',
+                status: AssignmentStatus.ACTIVE
+            });
+            await this.assignmentLogRepository.save(assignmentLog);
+
+            // 4. Update ParkingLog
+            const parkingLog = await this.parkingLogRepository.findOne({
+                where: { vehicle: { id: vehicle.id }, status: 'ASSIGNED' },
+                order: { entryTime: 'DESC' }
+            });
+            if (parkingLog) {
+                parkingLog.parkingSpace = space;
+                await this.parkingLogRepository.save(parkingLog);
+            }
+
+            await this.broadcastSpaceUpdate(space, 'RESERVED', vehicle.plateNumber, `배정 충돌 발생 ${vehicle.plateNumber} 재배정 실시: ${space.spaceCode}으로 재배정`);
+        } else {
+            console.warn(`[Reassign] Failed to find space for ${vehicle.plateNumber} in lot ${lotId}`);
+
+            // If we fail to reassign, mark as EXITED
+            const parkingLog = await this.parkingLogRepository.findOne({
+                where: { vehicle: { id: vehicle.id }, status: 'ASSIGNED' },
+                order: { entryTime: 'DESC' }
+            });
+            if (parkingLog) {
+                parkingLog.status = 'EXITED';
+                parkingLog.exitTime = new Date();
+                await this.parkingLogRepository.save(parkingLog);
+            }
+        }
+    }
+
+    async processSensorEvent(spaceId: string, sensorState: 'OCCUPIED' | 'EMPTY', detectedAt: Date = new Date()): Promise<void> {
+        const space = await this.spaceRepository.findOne({
+            where: { id: spaceId },
+            relations: ['zone', 'zone.parkingLot']
+        });
+
+        if (!space) throw new NotFoundException('Space not found');
+
+        // 1. Fetch Physical State (ParkingLog - Who is actually parked?)
+        const parkingLog = await this.parkingLogRepository.findOne({
+            where: { parkingSpace: { id: spaceId }, exitTime: IsNull() },
+            relations: ['vehicle'],
+            order: { entryTime: 'DESC' }
+        });
+
+        // 2. Fetch Logical Plan (AssignmentLog - Who should be here?)
+        // Get the LATEST assignment
+        const latestAssignment = await this.assignmentLogRepository.findOne({
+            where: { space: { id: spaceId } },
+            order: { assignedAt: 'DESC' },
+            relations: ['vehicle']
+        });
+
+        let errorType = '';
+        let description = '';
+        let shouldLog = false;
+
+        // Case 1: UNAUTHORIZED_OCCUPANCY (무단 점유)
+        // Condition: Occupied AND (No assignment OR Latest assignment is not ACTIVE)
+        // EXCEPTION: If the latest assignment is CANCELLED, it means a reassignment just happened (likely Spot Theft), so ignore.
+        if (sensorState === 'OCCUPIED' && parkingLog) {
+            if (!latestAssignment || (latestAssignment.status !== AssignmentStatus.ACTIVE && latestAssignment.status !== AssignmentStatus.CANCELLED)) {
+                errorType = 'UNAUTHORIZED_OCCUPANCY';
+                description = `Vehicle ${parkingLog.vehicle.plateNumber} parked without active assignment.`;
+                shouldLog = true;
+            }
+        }
+
+        // Case 2: SPOT_THEFT (자리 뺏김) -> Moved to occupySpace to handle race condition
+        // We do NOT check it here anymore to avoid duplicates.
+
+        // Case 3: ASSIGNMENT_EXPIRED (노쇼)
+        // Condition: Empty AND Active Assignment AND Time > 10min
+        if (sensorState === 'EMPTY' && !parkingLog && latestAssignment && latestAssignment.status === AssignmentStatus.ACTIVE) {
+            const timeoutMs = 10 * 60 * 1000;
+            const timeSinceAssignment = detectedAt.getTime() - latestAssignment.assignedAt.getTime();
+
+            if (timeSinceAssignment > timeoutMs) {
+                errorType = 'ASSIGNMENT_EXPIRED';
+                description = `Vehicle ${latestAssignment.vehicle.plateNumber} failed to park within 10 minutes.`;
+                shouldLog = true;
+
+                // Mark as EXPIRED to prevent duplicate logs
+                latestAssignment.status = AssignmentStatus.EXPIRED;
+                await this.assignmentLogRepository.save(latestAssignment);
+            }
+        }
+
+        if (shouldLog) {
+            console.warn(`[ErrorLog] ${errorType}: ${description}`);
+
+            const errorLog = this.errorLogRepository.create({
+                space,
+                parkingLog: parkingLog || undefined,
+                assignmentLog: latestAssignment || undefined,
+                sensorState,
+                dbState: space.status,
+                errorType,
+                detectedAt,
+                description
+            });
+            await this.errorLogRepository.save(errorLog);
+
+            if (space.zone?.parkingLot) {
+                this.eventsGateway.broadcastLog(
+                    space.zone.parkingLot.id,
+                    `🚨 ${errorType}: ${description}`,
+                    'ERROR'
+                );
+            }
+        }
     }
 }

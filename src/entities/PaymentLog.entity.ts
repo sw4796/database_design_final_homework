@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, OneToMany } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, CreateDateColumn, ManyToOne, OneToMany, Index } from 'typeorm';
 import { ParkingLog } from './ParkingLog.entity';
 import { FeePolicy } from './FeePolicy.entity';
 import { AppliedDiscount } from './AppliedDiscount.entity';
@@ -26,10 +26,11 @@ export class PaymentLog {
     @Column()
     paymentMethod: string;
 
+    @Index()
     @CreateDateColumn()
     paidAt: Date;
 
-    @Column()
+    @Column({ unique: true })
     receiptNo: string;
 
     @OneToMany(() => AppliedDiscount, (appliedDiscount) => appliedDiscount.paymentLog)

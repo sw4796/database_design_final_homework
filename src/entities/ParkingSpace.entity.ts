@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, OneToOne, JoinColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, OneToOne, JoinColumn, Index } from 'typeorm';
 import { Vehicle, VehicleType } from './Vehicle.entity';
 import { ParkingZone } from './ParkingZone.entity';
 
@@ -17,6 +17,7 @@ export enum SpaceStatus {
 }
 
 @Entity()
+@Index('IDX_SPACE_STATUS', ['zone', 'status'])
 export class ParkingSpace {
     @PrimaryGeneratedColumn('uuid')
     id: string;

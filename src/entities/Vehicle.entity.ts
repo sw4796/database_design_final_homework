@@ -1,4 +1,4 @@
-import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn } from 'typeorm';
+import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, CreateDateColumn, Index } from 'typeorm';
 import { User } from './User.entity';
 
 export enum VehicleType {
@@ -14,6 +14,7 @@ export class Vehicle {
     @PrimaryGeneratedColumn('uuid')
     id: string;
 
+    @Index({ unique: true })
     @Column()
     plateNumber: string;
 

@@ -29,6 +29,7 @@ import { AppliedDiscount } from './entities/AppliedDiscount.entity';
 
 import { UserService } from './services/user.service';
 import { UserController } from './controllers/user.controller';
+import { ErrorLog } from './entities/ErrorLog.entity';
 
 @Module({
   imports: [
@@ -57,6 +58,7 @@ import { UserController } from './controllers/user.controller';
           PaymentLog,
           PurchaseHistory,
           AppliedDiscount,
+          ErrorLog,
         ],
         synchronize: true, // Auto-create tables (dev only)
       }),
@@ -75,6 +77,7 @@ import { UserController } from './controllers/user.controller';
       PurchaseHistory,
       AppliedDiscount,
       User,
+      ErrorLog,
     ]),
   ],
   controllers: [AppController, ParkingController, PaymentController, SimulationController, PolicyController, PurchaseHistoryController, UserController],
