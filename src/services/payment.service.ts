@@ -70,11 +70,11 @@ export class PaymentService {
     }
 
     async previewFee(plateNumber: string, userId?: string): Promise<any> {
-        // 1. Find Active Parking Log
+        // 1. 활성 주차 로그 조회
         const parkingLog = await this.parkingLogRepository.findOne({
             where: {
                 vehicle: { plateNumber },
-                exitTime: IsNull(), // Still parked
+                exitTime: IsNull(), // 주차 중
             },
             relations: ['vehicle', 'parkingSpace', 'parkingSpace.zone', 'parkingSpace.zone.parkingLot'],
             order: { entryTime: 'DESC' }
@@ -86,7 +86,7 @@ export class PaymentService {
 
         const parkingLot = parkingLog.parkingSpace.zone.parkingLot;
 
-        // 2. Calculate Fee
+        // 2. 요금 계산
         const feePolicy = await this.feePolicyRepository.findOne({
             where: { parkingLot: { id: parkingLot.id } }
         });
@@ -99,7 +99,7 @@ export class PaymentService {
         const durationMinutes = Math.floor((now.getTime() - parkingLog.entryTime.getTime()) / 60000);
         const originalFee = await this.calculateFee(parkingLog.entryTime, now, feePolicy);
 
-        // 3. Apply Discounts (Simulation)
+        // 3. 할인 적용 (시뮬레이션)
         let discountAmount = 0;
         let finalFee = originalFee;
         let appliedDiscountsDetails: { description: string, amount: number, rate?: number }[] = [];
@@ -110,7 +110,7 @@ export class PaymentService {
                 if (user) {
                     const discountRules = await this.discountRuleRepository.find({ where: { parkingLot: { id: parkingLot.id } } });
 
-                    // Get Purchase History for today (simplified)
+                    // 오늘 구매 내역 조회
                     const today = new Date();
                     today.setHours(0, 0, 0, 0);
 
@@ -213,7 +213,7 @@ export class PaymentService {
                 throw new BadRequestException('Already paid');
             }
 
-            // Step 1: Create Payment Log
+            // 1단계: 결제 로그 생성
             if (transactionId && lotId) {
                 this.eventsGateway.broadcastLog(lotId, '결제 로그 생성 중...', 'INFO');
                 await this.sleep(2000);
@@ -238,7 +238,7 @@ export class PaymentService {
             });
             await queryRunner.manager.save(paymentLog);
 
-            // Step 2: Update Parking Log Status
+            // 2단계: 주차 로그 상태 업데이트
             if (transactionId && lotId) {
                 this.eventsGateway.broadcastLog(lotId, '주차 상태 변경 중 (PAID)...', 'INFO');
                 await this.sleep(2000);
@@ -248,7 +248,7 @@ export class PaymentService {
             parkingLog.status = 'PAID';
             await queryRunner.manager.save(parkingLog);
 
-            // Step 3: Save Applied Discounts
+            // 3단계: 적용된 할인 저장
             if (transactionId && lotId) {
                 this.eventsGateway.broadcastLog(lotId, '할인 내역 저장 중...', 'INFO');
                 await this.sleep(2000);
@@ -269,7 +269,7 @@ export class PaymentService {
                 await queryRunner.manager.save(AppliedDiscount, applied);
             }
 
-            // Step 4: Link User
+            // 4단계: 사용자 연동
             if (transactionId && lotId) {
                 this.eventsGateway.broadcastLog(lotId, '사용자 정보 연동 중...', 'INFO');
                 await this.sleep(2000);
@@ -339,8 +339,8 @@ export class PaymentService {
     }
 
     async getPayableVehicles(lotId: string): Promise<any[]> {
-        // Find all parking logs that are NOT PAID (i.e., PARKED or EXITED but not settled)
-        // filtered by the specific parking lot.
+        // 미결제 주차 로그 조회
+        // 해당 주차장만 필터링
         const logs = await this.parkingLogRepository.find({
             where: {
                 status: Not('PAID'),
@@ -354,15 +354,14 @@ export class PaymentService {
             order: { entryTime: 'DESC' }
         });
 
-        // We might have multiple logs for the same vehicle if there are old unpaid ones (though unlikely in this flow).
-        // But let's deduplicate by vehicle ID, preferring the most recent one.
+        // 중복 로그 제거 (최신 로그 우선)
         const vehicleMap = new Map<string, any>();
 
         for (const log of logs) {
             if (!vehicleMap.has(log.vehicle.id)) {
                 vehicleMap.set(log.vehicle.id, {
                     ...log.vehicle,
-                    // Attach the log status so frontend knows if it's exited or parked
+                    // 로그 상태 포함 (출차 여부 확인용)
                     parkingStatus: log.status,
                     parkingLogId: log.id
                 });

@@ -55,7 +55,7 @@ export class ParkingService {
         const logPrefix = `[${txId}] Car-${plateNumber}`;
         console.log(`${logPrefix} 배정 요청 접수`);
 
-        // Broadcast initial attempt
+        // 배정 시도 알림
         if (lotId) {
             this.eventsGateway.broadcastLog(lotId, `${logPrefix} 배정 요청 접수`, 'INFO');
         }
@@ -66,18 +66,15 @@ export class ParkingService {
             const assignmentLogRepo = manager.getRepository(AssignmentLog);
             const parkingLogRepo = manager.getRepository(ParkingLog);
 
-            // 1. Find or Create Vehicle
+            // 1. 차량 조회 또는 생성
             let vehicle = await vehicleRepo.findOne({ where: { plateNumber } });
             if (!vehicle) {
                 vehicle = vehicleRepo.create({ plateNumber, type });
                 await vehicleRepo.save(vehicle);
             }
 
-            // Note: We are skipping clearVehicleFromSpaces for this transaction demo to keep it simple and focused on the locking.
-            // In a real scenario, we would need to handle the clearing within the transaction as well.
-
-            // 2. Find Available Space
-            // Filter by lotId if provided
+            // 2. 가용 주차면 조회
+            // 주차장 ID로 필터링
             const whereCondition: any = {
                 status: SpaceStatus.EMPTY,
                 type: type === VehicleType.EV ? SpaceType.EV :
@@ -102,7 +99,7 @@ export class ParkingService {
             });
 
             if (!space && type !== VehicleType.DISABLED) {
-                // Fallback to GENERAL if specific type not found (except DISABLED)
+                // 장애인 차량 제외하고 일반 주차면으로 대체 조회
                 const fallbackCondition: any = {
                     status: SpaceStatus.EMPTY,
                     type: SpaceType.GENERAL
@@ -132,12 +129,12 @@ export class ParkingService {
 
             await new Promise(resolve => setTimeout(resolve, 2000)); // Artificial Delay
 
-            // 3. Reserve Space
+            // 3. 주차면 예약
             space.status = SpaceStatus.RESERVED;
             space.currentVehicleId = vehicle.id;
             await spaceRepo.save(space);
 
-            // 4. Create Assignment Log
+            // 4. 배정 로그 생성
             const assignmentLog = assignmentLogRepo.create({
                 space,
                 vehicle,
@@ -145,12 +142,12 @@ export class ParkingService {
             });
             await assignmentLogRepo.save(assignmentLog);
 
-            // 5. Create Initial Parking Log (Entry Time)
+            // 5. 주차 로그 생성 (입차 시간)
             const parkingLog = parkingLogRepo.create({
                 parkingSpace: space,
                 vehicle,
                 entryTime: new Date(),
-                status: 'ASSIGNED', // New status for assigned but not yet parked
+                status: 'ASSIGNED', // 배정됨 상태
             });
             await parkingLogRepo.save(parkingLog);
 
@@ -159,9 +156,7 @@ export class ParkingService {
                 this.eventsGateway.broadcastLog(lotId, `${logPrefix} 배정 완료 (Commit & Lock 해제) -> ${space.spaceCode}`, 'SUCCESS');
             }
 
-            // 5. Broadcast Update (Execute after commit effectively, but here is fine as it's just event)
-            // We use the service method which uses the separate repo, but that's okay for broadcast.
-            // To be safe, we can just fire and forget or await.
+            // 6. 상태 변경 알림
             await this.broadcastSpaceUpdate(space, 'RESERVED', vehicle.plateNumber, `${vehicle.plateNumber} 입차: ${space.spaceCode} 배정`);
 
             return {
@@ -179,21 +174,18 @@ export class ParkingService {
         const vehicle = await this.vehicleRepository.findOne({ where: { plateNumber } });
         if (!vehicle) throw new NotFoundException('Vehicle not found');
 
-        // Try to find by ID first
+        // ID로 먼저 조회
         let targetSpace = await this.spaceRepository.findOne({
             where: { id: spaceIdentifier },
             relations: ['zone', 'zone.parkingLot']
         });
 
-        // If found by ID, verify Lot ID if provided
+        // ID로 찾았으나 주차장 ID가 다르면 거부
         if (targetSpace && lotId && targetSpace.zone?.parkingLot?.id !== lotId) {
-            // If ID matches but Lot doesn't, it's a cross-lot attempt (or ID collision which is impossible for UUID)
-            // But more likely, the user provided an ID from another lot.
-            // We should reject this.
             throw new BadRequestException(`Space ${targetSpace.spaceCode} belongs to a different parking lot.`);
         }
 
-        // If not found by ID, try by Code
+        // ID로 못 찾으면 코드로 조회
         if (!targetSpace) {
             const whereCondition: any = { spaceCode: spaceIdentifier };
             if (lotId) {
@@ -210,18 +202,17 @@ export class ParkingService {
 
         let victimVehicle: Vehicle | null = null;
 
-        // Conflict Logic
+        // 자리 충돌
         if (targetSpace.status === SpaceStatus.RESERVED && targetSpace.currentVehicleId !== vehicle.id) {
-            // Stealing someone else's spot!
             const victimVehicleId = targetSpace.currentVehicleId;
             if (victimVehicleId) {
                 victimVehicle = await this.vehicleRepository.findOne({ where: { id: victimVehicleId } });
 
-                // [SPOT_THEFT] Log Error Immediately
+                // [SPOT_THEFT] 즉시 에러 로그 기록
                 if (victimVehicle) {
                     console.warn(`[ErrorLog] SPOT_THEFT: Space assigned to ${victimVehicle.plateNumber} but occupied by ${vehicle.plateNumber}.`);
 
-                    // Find Assignment Log for Victim
+                    // 피해 차량의 배정 로그 조회
                     const victimAssignment = await this.assignmentLogRepository.findOne({
                         where: { vehicle: { id: victimVehicle.id }, status: AssignmentStatus.ACTIVE },
                         order: { assignedAt: 'DESC' }
@@ -251,20 +242,20 @@ export class ParkingService {
             throw new BadRequestException('Space is already occupied.');
         }
 
-        // Ensure the vehicle is not assigned to any OTHER space (e.g. it was reserved elsewhere)
+        // 다른 주차면에 할당된 정보 제거
         await this.clearVehicleFromSpaces(vehicle.id, targetSpace.id);
 
-        // Occupy the space
+        // 주차면 점유 처리
         targetSpace.status = SpaceStatus.OCCUPIED;
         targetSpace.currentVehicleId = vehicle.id;
         await this.spaceRepository.save(targetSpace);
 
-        // Reassign Victim AFTER occupation to ensure they don't get the same spot back
+        // 점유 후 피해 차량 재배정
         if (victimVehicle) {
             try {
                 console.log(`Reassigning victim ${victimVehicle.plateNumber} from ${targetSpace.spaceCode}`);
 
-                // Use the Lot ID from the target space to ensure they stay in the same lot
+                // 같은 주차장 내에서 재배정
                 const currentLotId = targetSpace.zone?.parkingLot?.id || lotId;
 
                 await this.reassignVehicle(victimVehicle, currentLotId);
@@ -273,7 +264,7 @@ export class ParkingService {
             }
         }
 
-        // Update Parking Log (Find the ASSIGNED log)
+        // 주차 로그 업데이트 (배정 상태 찾기)
         let parkingLog = await this.parkingLogRepository.findOne({
             where: { vehicle: { id: vehicle.id }, status: 'ASSIGNED' },
             order: { entryTime: 'DESC' }
@@ -281,10 +272,10 @@ export class ParkingService {
 
         if (parkingLog) {
             parkingLog.status = 'PARKED';
-            parkingLog.parkingSpace = targetSpace; // Update space in case they parked in a different spot than assigned
+            parkingLog.parkingSpace = targetSpace; // 배정된 곳과 다른 곳에 주차했을 경우 업데이트
             await this.parkingLogRepository.save(parkingLog);
         } else {
-            // Fallback if no ASSIGNED log found (shouldn't happen in normal flow but good for robustness)
+            // 배정 로그가 없는 경우 (예외 상황)
             parkingLog = this.parkingLogRepository.create({
                 parkingSpace: targetSpace,
                 vehicle,
@@ -294,13 +285,13 @@ export class ParkingService {
             await this.parkingLogRepository.save(parkingLog);
         }
 
-        // Broadcast Update
+        // 상태 변경 알림
         await this.broadcastSpaceUpdate(targetSpace, 'OCCUPIED', vehicle.plateNumber, `${targetSpace.spaceCode}: ${vehicle.plateNumber} 주차 완료`);
 
-        // Trigger Sensor Event Processing (Check for errors)
+        // 센서 이벤트 처리 (에러 감지)
         await this.processSensorEvent(targetSpace.id, 'OCCUPIED');
 
-        // Update Assignment Log Status to COMPLETED
+        // 배정 로그 상태 완료로 변경
         const activeAssignment = await this.assignmentLogRepository.findOne({
             where: {
                 vehicle: { id: vehicle.id },
@@ -353,7 +344,7 @@ export class ParkingService {
         });
         if (log) {
             log.status = 'EXITED';
-            // exitTime is NOT set here. It is set upon payment.
+            // 출차 시간은 결제 시 설정됨
             // log.exitTime = new Date(); 
             await this.parkingLogRepository.save(log);
         }
@@ -373,7 +364,7 @@ export class ParkingService {
                 'parkingUpdate',
                 {
                     spaceId: space.id,
-                    spaceCode: space.spaceCode, // Add spaceCode for frontend matching
+                    spaceCode: space.spaceCode, // 프론트엔드 매칭용 코드
                     status,
                     vehiclePlate: plateNumber,
                     message // Custom log message
@@ -403,8 +394,8 @@ export class ParkingService {
     }
 
     async getAllVehicles(lotId?: string): Promise<Vehicle[]> {
-        // Only return vehicles that are currently assigned to a space (Reserved or Occupied)
-        // If lotId is provided, filter by spaces in that lot
+        // 현재 배정된 차량만 조회 (예약 또는 점유)
+        // 주차장 ID가 있으면 해당 주차장만 필터링
         const whereCondition: any = { currentVehicleId: Not(IsNull()) };
 
         if (lotId) {
@@ -417,12 +408,12 @@ export class ParkingService {
             order: { spaceCode: 'ASC' }
         });
 
-        // Filter out any potential nulls (though query shouldn't return them) and map to vehicle
+        // null 필터링 및 차량 매핑
         const vehicles = spaces
             .map(space => space.vehicle)
             .filter(vehicle => vehicle !== null && vehicle !== undefined);
 
-        // Remove duplicates if any (though 1:1 constraint prevents this, good for safety)
+        // 중복 제거
         const uniqueVehicles = Array.from(new Map(vehicles.map(v => [v.id, v])).values());
 
         return uniqueVehicles.sort((a, b) => a.plateNumber.localeCompare(b.plateNumber));
@@ -433,7 +424,7 @@ export class ParkingService {
 
         if (space.status === SpaceStatus.CLOSED) return { message: 'Space already closed' };
 
-        // If occupied or reserved, reassign the vehicle
+        // 점유 중이거나 예약된 경우 재배정
         if (space.currentVehicleId) {
             const vehicle = await this.vehicleRepository.findOne({ where: { id: space.currentVehicleId } });
             if (vehicle) {
@@ -473,7 +464,7 @@ export class ParkingService {
             whereCondition.zone = { parkingLot: { id: lotId } };
         }
 
-        // Find new space
+        // 새 주차면 찾기
         let space = await this.spaceRepository.findOne({
             where: whereCondition,
             order: { spaceCode: 'ASC' },
@@ -496,7 +487,7 @@ export class ParkingService {
         if (space) {
             console.log(`[Reassign] Found new space ${space.spaceCode} for ${vehicle.plateNumber}`);
 
-            // 1. Cancel Old Assignment
+            // 1. 기존 배정 취소
             const oldAssignment = await this.assignmentLogRepository.findOne({
                 where: { vehicle: { id: vehicle.id }, status: AssignmentStatus.ACTIVE },
                 order: { assignedAt: 'DESC' }
@@ -506,12 +497,12 @@ export class ParkingService {
                 await this.assignmentLogRepository.save(oldAssignment);
             }
 
-            // 2. Reserve New Space
+            // 2. 새 주차면 예약
             space.status = SpaceStatus.RESERVED;
             space.currentVehicleId = vehicle.id;
             await this.spaceRepository.save(space);
 
-            // 3. Create New Assignment
+            // 3. 새 배정 생성
             const assignmentLog = this.assignmentLogRepository.create({
                 space,
                 vehicle,
@@ -520,7 +511,7 @@ export class ParkingService {
             });
             await this.assignmentLogRepository.save(assignmentLog);
 
-            // 4. Update ParkingLog
+            // 4. 주차 로그 업데이트
             const parkingLog = await this.parkingLogRepository.findOne({
                 where: { vehicle: { id: vehicle.id }, status: 'ASSIGNED' },
                 order: { entryTime: 'DESC' }
@@ -534,7 +525,7 @@ export class ParkingService {
         } else {
             console.warn(`[Reassign] Failed to find space for ${vehicle.plateNumber} in lot ${lotId}`);
 
-            // If we fail to reassign, mark as EXITED
+            // 재배정 실패 시 출차 처리
             const parkingLog = await this.parkingLogRepository.findOne({
                 where: { vehicle: { id: vehicle.id }, status: 'ASSIGNED' },
                 order: { entryTime: 'DESC' }
@@ -555,15 +546,15 @@ export class ParkingService {
 
         if (!space) throw new NotFoundException('Space not found');
 
-        // 1. Fetch Physical State (ParkingLog - Who is actually parked?)
+        // 1. 물리적 상태 조회 (주차 로그 - 실제 주차된 차량)
         const parkingLog = await this.parkingLogRepository.findOne({
             where: { parkingSpace: { id: spaceId }, exitTime: IsNull() },
             relations: ['vehicle'],
             order: { entryTime: 'DESC' }
         });
 
-        // 2. Fetch Logical Plan (AssignmentLog - Who should be here?)
-        // Get the LATEST assignment
+        // 2. 논리적 계획 조회 (배정 로그 - 여기 있어야 할 차량)
+        // 최신 배정 조회
         const latestAssignment = await this.assignmentLogRepository.findOne({
             where: { space: { id: spaceId } },
             order: { assignedAt: 'DESC' },
@@ -574,9 +565,9 @@ export class ParkingService {
         let description = '';
         let shouldLog = false;
 
-        // Case 1: UNAUTHORIZED_OCCUPANCY (무단 점유)
-        // Condition: Occupied AND (No assignment OR Latest assignment is not ACTIVE)
-        // EXCEPTION: If the latest assignment is CANCELLED, it means a reassignment just happened (likely Spot Theft), so ignore.
+        // Case 1: 무단 점유
+        // 조건: 점유됨 AND (배정 없음 OR 최신 배정이 활성 상태 아님)
+        // 예외: 최신 배정이 취소된 경우(재배정 직후)는 무시
         if (sensorState === 'OCCUPIED' && parkingLog) {
             if (!latestAssignment || (latestAssignment.status !== AssignmentStatus.ACTIVE && latestAssignment.status !== AssignmentStatus.CANCELLED)) {
                 errorType = 'UNAUTHORIZED_OCCUPANCY';
@@ -585,11 +576,11 @@ export class ParkingService {
             }
         }
 
-        // Case 2: SPOT_THEFT (자리 뺏김) -> Moved to occupySpace to handle race condition
-        // We do NOT check it here anymore to avoid duplicates.
+        // Case 2: 자리 뺏김 -> occupySpace로 이동됨 (경쟁 조건 해결)
+        // 중복 방지를 위해 여기서는 체크하지 않음
 
-        // Case 3: ASSIGNMENT_EXPIRED (노쇼)
-        // Condition: Empty AND Active Assignment AND Time > 10min
+        // Case 3: 노쇼
+        // 조건: 비어있음 AND 활성 배정 있음 AND 10분 경과
         if (sensorState === 'EMPTY' && !parkingLog && latestAssignment && latestAssignment.status === AssignmentStatus.ACTIVE) {
             const timeoutMs = 10 * 60 * 1000;
             const timeSinceAssignment = detectedAt.getTime() - latestAssignment.assignedAt.getTime();
@@ -599,7 +590,7 @@ export class ParkingService {
                 description = `Vehicle ${latestAssignment.vehicle.plateNumber} failed to park within 10 minutes.`;
                 shouldLog = true;
 
-                // Mark as EXPIRED to prevent duplicate logs
+                // 중복 로그 방지를 위해 만료 처리
                 latestAssignment.status = AssignmentStatus.EXPIRED;
                 await this.assignmentLogRepository.save(latestAssignment);
             }

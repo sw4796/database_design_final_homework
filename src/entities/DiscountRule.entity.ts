@@ -2,15 +2,8 @@ import { Entity, PrimaryGeneratedColumn, Column, ManyToOne, Check } from 'typeor
 import { ParkingLot } from './ParkingLot.entity';
 
 @Entity()
-@Check(`"CHK_DISCOUNT_LOGIC"`, `(
-    ("targetType" = 'USER_GRADE' AND "grade" IS NOT NULL) OR
-    ("targetType" = 'PURCHASE_AMOUNT' AND "minPurchaseAmount" > 0) OR
-    ("targetType" NOT IN ('USER_GRADE', 'PURCHASE_AMOUNT')) 
-)`)
-@Check(`"CHK_DISCOUNT_VALUE"`, `(
-    ("discountRate" > 0 AND "discountAmount" = 0) OR
-    ("discountRate" = 0 AND "discountAmount" > 0)
-)`)
+@Check(`(targetType = 'USER_GRADE' AND grade IS NOT NULL) OR (targetType = 'PURCHASE_AMOUNT' AND minPurchaseAmount > 0) OR (targetType NOT IN ('USER_GRADE', 'PURCHASE_AMOUNT'))`)
+@Check(`(discountRate > 0 AND discountAmount = 0) OR (discountRate = 0 AND discountAmount > 0)`)
 export class DiscountRule {
     @PrimaryGeneratedColumn('uuid')
     id: string;
