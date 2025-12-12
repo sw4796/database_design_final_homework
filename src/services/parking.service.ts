@@ -424,18 +424,23 @@ export class ParkingService {
 
         if (space.status === SpaceStatus.CLOSED) return { message: 'Space already closed' };
 
-        // 점유 중이거나 예약된 경우 재배정
-        if (space.currentVehicleId) {
-            const vehicle = await this.vehicleRepository.findOne({ where: { id: space.currentVehicleId } });
-            if (vehicle) {
-                await this.reassignVehicle(vehicle, space.zone?.parkingLot?.id);
-            }
-        }
+        const currentVehicleId = space.currentVehicleId;
 
+        // 1. 먼저 현재 주차면을 폐쇄 상태로 변경하고 차량 정보를 제거 (유니크 제약 조건 회피)
         space.status = SpaceStatus.CLOSED;
         space.currentVehicleId = null;
         await this.spaceRepository.save(space);
         await this.broadcastSpaceUpdate(space, 'CLOSED', null, `${space.spaceCode} 폐쇄됨`);
+
+        // 2. 배정된 차량이 있었다면 재배정 수행
+        if (currentVehicleId) {
+            const vehicle = await this.vehicleRepository.findOne({ where: { id: currentVehicleId } });
+            if (vehicle) {
+                console.log(`[CloseSpot] Reassigning vehicle ${vehicle.plateNumber} from closed space ${space.spaceCode}`);
+                await this.reassignVehicle(vehicle, space.zone?.parkingLot?.id);
+            }
+        }
+
         return { message: 'Space closed' };
     }
 

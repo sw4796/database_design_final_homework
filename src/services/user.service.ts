@@ -46,4 +46,20 @@ export class UserService {
         });
         return this.userRepository.save(defaultUser);
     }
+    async update(id: string, attrs: Partial<User>): Promise<User> {
+        const user = await this.findOne(id);
+        if (!user) {
+            throw new Error('User not found');
+        }
+        Object.assign(user, attrs);
+        return this.userRepository.save(user);
+    }
+
+    async remove(id: string): Promise<void> {
+        const user = await this.findOne(id);
+        if (!user) {
+            throw new Error('User not found');
+        }
+        await this.userRepository.remove(user);
+    }
 }

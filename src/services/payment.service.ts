@@ -245,8 +245,11 @@ export class PaymentService {
                 this.checkCancellation(transactionId);
             }
 
-            parkingLog.status = 'PAID';
-            await queryRunner.manager.save(parkingLog);
+            // Explicitly update status and exitTime using update() to avoid object state issues
+            await queryRunner.manager.update(ParkingLog, parkingLog.id, {
+                status: 'PAID',
+                exitTime: new Date()
+            });
 
             // 3단계: 적용된 할인 저장
             if (transactionId && lotId) {
@@ -279,8 +282,9 @@ export class PaymentService {
             if (userId) {
                 const user = await queryRunner.manager.findOne(User, { where: { id: userId } });
                 if (user) {
-                    parkingLog.user = user;
-                    await queryRunner.manager.save(parkingLog);
+                    // Update user relation explicitly
+                    await queryRunner.manager.update(ParkingLog, parkingLog.id, { user: user });
+
                     const logMsg3 = `[DB] User Linked to ParkingLog: ${user.name}`;
                     console.log(logMsg3);
                     if (transactionId && lotId) {

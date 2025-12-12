@@ -1,4 +1,4 @@
-import { Controller, Get, Post, Body, Param, NotFoundException, Query } from '@nestjs/common';
+import { Controller, Get, Post, Body, Param, NotFoundException, Query, Patch, Delete } from '@nestjs/common';
 import { UserService } from '../services/user.service';
 import { User } from '../entities/User.entity';
 
@@ -29,5 +29,15 @@ export class UserController {
     @Post()
     async create(@Body() user: Partial<User>): Promise<User> {
         return this.userService.create(user);
+    }
+
+    @Patch(':id')
+    async update(@Param('id') id: string, @Body() user: Partial<User>): Promise<User> {
+        return this.userService.update(id, user);
+    }
+
+    @Delete(':id')
+    async remove(@Param('id') id: string): Promise<void> {
+        return this.userService.remove(id);
     }
 }
